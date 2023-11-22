@@ -39,6 +39,16 @@ python search.py
 
 ## `Example`
 
+**WORKING**
+```py
+results = MangaSearch.get_manga_details("to hell with being a doctor")
+
+print(results) # It returns everything, including description, chapters, title, URL, and even raw chapters.
+```
+
+__The deprecated example should still work, if you want to use that instead.__
+
+**DEPRECATED**
 ```python
 query_name = "demon"
 search_results = MangaSearch.search_manga(query_name)
