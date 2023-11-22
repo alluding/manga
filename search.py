@@ -1,18 +1,8 @@
-import requests
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import List, Optional
 from enum import Enum
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import requests
 from bs4 import BeautifulSoup
-
-@dataclass
-class Manga:
-    title: str
-    url: str
-    type: str
-    description: str = ""
-    chapters: List['Chapter'] = None 
 
 @dataclass
 class Chapter:
@@ -20,10 +10,33 @@ class Chapter:
     url: str
     release_date: str
 
+@dataclass
 class MangaType(Enum):
     MANGA = "manga"
     ANIME = "anime"
     UNKNOWN = "unknown"
+
+@dataclass
+class Manga:
+    title: str
+    url: str
+    type: MangaType
+    description: str = ""
+    chapters: List[Chapter] = field(default_factory=list)
+    image_url: Optional[str] = None
+    raw_chapters: List[List[str]] = field(default_factory=list)
+
+    def with_description(self):
+        self.description = MangaSearch.get_description(self)
+
+    def with_chapters(self):
+        self.chapters = MangaSearch.get_chapters(self)
+
+    def with_image(self):
+        self.image_url = MangaSearch.get_manga_image(self)
+
+    def with_raw_chapters(self):
+        self.raw_chapters = MangaSearch.scrape_raw_chapters(self.chapters)
 
 class MangaSearch:
     BASE_URL = 'https://manhuaus.com/wp-admin/admin-ajax.php'
@@ -54,24 +67,12 @@ class MangaSearch:
             print(f"Error making request: {e}")
             return None
 
-    @staticmethod
-    def _parse_chapter(element):
+    @classmethod
+    def _parse_chapter(cls, element):
         chapter_number = element.find('a').text.strip()
         chapter_url = element.find('a')['href']
         release_date = element.find('span', class_='chapter-release-date').text.strip()
         return Chapter(number=chapter_number, url=chapter_url, release_date=release_date)
-
-    @classmethod
-    def search_manga(cls, query_name: str) -> List[Manga]:
-        data = {
-            'action': 'wp-manga-search-manga',
-            'title': query_name,
-        }
-        response = cls._make_request('post', cls.BASE_URL, data=data)
-        return [
-            Manga(title=manga['title'], url=manga['url'], type=MangaType(manga['type']))
-            for manga in response.json().get('data', []) if response.status_code == 200
-        ]
 
     @classmethod
     def get_description(cls, manga: Manga):
@@ -80,30 +81,66 @@ class MangaSearch:
             soup = BeautifulSoup(response.content, 'html.parser')
             description_element = soup.find('div', class_='description-summary')
             if description_element:
-                manga.description = description_element.get_text().strip().replace("Show more", "")
+                return description_element.get_text().strip().replace("Show more", "")
 
     @classmethod
-    def get_chapters(cls, manga: Manga):
+    def get_chapters(cls, manga: Manga) -> List[Chapter]:
         response = cls._make_request('get', manga.url)
         if response and response.status_code == 200:
             soup = BeautifulSoup(response.content, 'html.parser')
             chapter_elements = soup.find_all('li', class_='wp-manga-chapter')
-            manga.chapters = [cls._parse_chapter(element) for element in chapter_elements]
+            chapters = [cls._parse_chapter(element) for element in chapter_elements]
+            manga.chapters = chapters
+            return chapters
+        return []
 
     @classmethod
-    def cosine_similarity_search(cls, query: str, results: List[Manga]) -> List[Manga]:
-        vectorizer = CountVectorizer().fit_transform([query] + [result.title for result in results])
-        cosine_similarities = cosine_similarity(vectorizer)
-        query_index = 0
-        similarity_scores = cosine_similarities[query_index][1:]
-        sorted_indices = similarity_scores.argsort()[::-1]
-        sorted_results = [results[i] for i in sorted_indices]
-        return sorted_results
+    def get_manga_image(cls, manga: Manga):
+        response = cls._make_request('get', manga.url)
+        if response and response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'html.parser')
+            image_element = soup.select_one('div.tab-summary > div.summary_image > a > img')
+            if image_element:
+                manga.image_url = image_element['src']
 
-query_name = "to hell with being a"
-search_results = MangaSearch.search_manga(query_name)
+    @staticmethod
+    def scrape_raw_chapters(chapters: List[Chapter]) -> List[List[str]]:
+        all_raw_chapters = []
+        for chapter in chapters:
+            try:
+                response = requests.get(chapter.url)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    image_tags = soup.find_all('img', {'class': 'wp-manga-chapter-img'})
+                    image_urls = [img['data-src'].strip() for img in image_tags if 'data-src' in img.attrs]
+                    all_raw_chapters.append(image_urls)
+                else:
+                    print(f"Failed to fetch URL: {chapter.url}. Status code: {response.status_code}")
+            except requests.RequestException as e:
+                print(f"Request Exception: {e}")
+        return all_raw_chapters
 
-if search_results:
-    print("Search Results:")
-    for result in search_results:
-        print(f"{result.title} - {result.url} ({result.type})")
+    @classmethod
+    def get_manga_details(cls, query_name: str) -> List[Manga]:
+        data = {'action': 'wp-manga-search-manga', 'title': query_name}
+        response = cls._make_request('post', cls.BASE_URL, data=data)
+
+        if response and response.status_code == 200:
+            manga_list = [
+                Manga(
+                    title=manga_data['title'],
+                    url=manga_data['url'],
+                    type=MangaType(manga_data['type'])
+                )
+                for manga_data in response.json().get('data', [])
+            ]
+
+            for manga in manga_list:
+                manga.with_description()
+                manga.with_chapters()
+                manga.with_image()
+                manga.with_raw_chapters()
+
+            return manga_list
+        return []
+
